@@ -8,7 +8,7 @@ from typing import Annotated, Any
 from mcp.server.fastmcp import FastMCP, Image
 from pydantic import Field
 from starlette.requests import Request
-from starlette.responses import FileResponse, PlainTextResponse, Response
+from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
 import media_links
 import media_preview
@@ -508,6 +508,60 @@ async def media_file(request: Request) -> Response:
     if target is None:
         return PlainTextResponse("Not found", status_code=404)
     return FileResponse(target, filename=target.name)
+
+
+@mcp.tool()
+def prepare_upload(filename: str) -> dict[str, Any]:
+    """Get an upload URL for a file on the client's machine, to send it with send_file.
+
+    For a client on another machine than the server (http/sse transport with
+    WHATSAPP_MEDIA_BASE_URL set). PUT the file's bytes to url, e.g.
+    `curl --fail -T ./report.pdf "<url>"`, then call send_file (or
+    send_audio_message) with media_path. The url accepts one upload and expires
+    after an hour or when the server restarts.
+
+    Args:
+        filename: Name the file is sent under, e.g. "report.pdf"
+
+    Returns:
+        A dictionary with success status, url and media_path
+    """
+    upload = media_links.signed_upload(filename)
+    if upload is None:
+        return {"success": False, "message": "Uploads need WHATSAPP_MEDIA_BASE_URL and a non-empty filename"}
+    return {"success": True, **upload}
+
+
+@mcp.custom_route(media_links.UPLOAD_ROUTE_PREFIX + "{path:path}", methods=["PUT"])
+async def upload_file(request: Request) -> Response:
+    """Stream a file named by a signed URL from prepare_upload into the outbox."""
+    target = media_links.upload_target(
+        request.path_params["path"],
+        request.query_params.get("expires", ""),
+        request.query_params.get("sig", ""),
+    )
+    if target is None:
+        return PlainTextResponse("Not found", status_code=404)
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    partial = target.with_name(target.name + ".part")
+    size = 0
+    try:
+        with open(partial, "xb") as out:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > media_links.MAX_UPLOAD_BYTES:
+                    raise ValueError("too large")
+                out.write(chunk)
+    except FileExistsError:
+        return PlainTextResponse("Upload already in progress", status_code=409)
+    except ValueError:
+        partial.unlink(missing_ok=True)
+        return PlainTextResponse("File too large", status_code=413)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    partial.rename(target)
+    return JSONResponse({"media_path": str(target), "size": size}, status_code=201)
 
 
 @mcp.tool()

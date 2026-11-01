@@ -67,3 +67,72 @@ def resolve(rel_path: str, expires: str, sig: str, store_root: Path, now: float 
     if not target.is_relative_to(root) or not target.is_file():
         return None
     return target
+
+
+# Uploads: the mirror of download links, for send_file from a remote client.
+# The bridge only sends files under its media roots, so uploads land in the
+# first of those (the same default outbox the bridge creates).
+UPLOAD_ROUTE_PREFIX = "/upload/"
+MAX_UPLOAD_BYTES = 2 * 1024**3  # WhatsApp's document limit
+_DEFAULT_OUTBOX = ".local/share/whatsapp-mcp/outbox"
+
+
+def upload_root() -> Path:
+    """Directory under the bridge's first media root that receives uploads."""
+    roots = [r.strip() for r in os.getenv("WHATSAPP_MEDIA_ROOTS", "").split(os.pathsep) if r.strip()]
+    root = Path(roots[0]) if roots else Path.home() / _DEFAULT_OUTBOX
+    return root / "uploads"
+
+
+def _safe_name(filename: str) -> str | None:
+    name = Path(filename.replace("\\", "/")).name.strip()
+    return None if name in ("", ".", "..") else name
+
+
+def sweep_expired_uploads(root: Path, now: float | None = None) -> None:
+    """Delete upload directories whose links expired more than a TTL ago."""
+    cutoff = (now if now is not None else time.time()) - 2 * URL_TTL_SECONDS
+    if not root.is_dir():
+        return
+    for slot in root.iterdir():
+        if slot.is_dir() and slot.stat().st_mtime < cutoff:
+            for f in slot.iterdir():
+                f.unlink(missing_ok=True)
+            slot.rmdir()
+
+
+def signed_upload(filename: str, now: float | None = None) -> dict[str, str] | None:
+    """Return {url, media_path} for a one-file upload, or None.
+
+    None when WHATSAPP_MEDIA_BASE_URL is unset or the filename is empty.
+    """
+    base = base_url()
+    name = _safe_name(filename)
+    if base is None or name is None:
+        return None
+    root = upload_root()
+    sweep_expired_uploads(root, now)
+    rel = f"{secrets.token_hex(16)}/{name}"
+    expires = int(now if now is not None else time.time()) + URL_TTL_SECONDS
+    query = urlencode({"expires": expires, "sig": _signature("upload:" + rel, expires)})
+    return {
+        "url": f"{base}{UPLOAD_ROUTE_PREFIX}{quote(rel)}?{query}",
+        "media_path": str(root / rel),
+    }
+
+
+def upload_target(rel_path: str, expires: str, sig: str, now: float | None = None) -> Path | None:
+    """Return where a signed upload URL writes, or None if invalid, expired or already used."""
+    try:
+        expires_at = int(expires)
+    except ValueError:
+        return None
+    if expires_at < (now if now is not None else time.time()):
+        return None
+    if not hmac.compare_digest(sig, _signature("upload:" + rel_path, expires_at)):
+        return None
+    root = upload_root().resolve()
+    target = (root / rel_path).resolve()
+    if not target.is_relative_to(root) or target.exists():
+        return None
+    return target

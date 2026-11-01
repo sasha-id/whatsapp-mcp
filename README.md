@@ -292,6 +292,21 @@ additional absolute directories.
 For documents, recipients receive only the filename portion of `file_path`;
 parent directories are not exposed.
 
+#### `prepare_upload`
+
+Get an upload URL for a file that lives on the client's machine, for a client
+that is not on the server's host (`http`/`sse` with `WHATSAPP_MEDIA_BASE_URL`
+set). Returns `url` and `media_path`: PUT the file's bytes to `url`
+(`curl --fail -T ./report.pdf "<url>"`; the body is streamed to disk, up to
+2 GiB), then pass `media_path` to `send_file` or `send_audio_message`. The file
+lands under `uploads/` in the first media root, so the bridge accepts it. Each
+URL takes one upload and expires after an hour or when the server restarts;
+uploads older than two hours are deleted when the next one is prepared.
+
+**Parameters:**
+
+- `filename` (required): Name the file is sent under
+
 #### `send_audio_message`
 
 Send a voice message (automatically converts to Opus .ogg format).
@@ -499,7 +514,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |
 | `WHATSAPP_MCP_PORT`    | `8000`                                   | Port for the `http`/`sse` transports |
-| `WHATSAPP_MEDIA_BASE_URL` | unset | Public URL clients use to reach this server (e.g. `https://wa.example.com`, behind your proxy). When set, `download_media` also returns a signed, expiring `url` served at `<base>/media/…`. `http`/`sse` transports only |
+| `WHATSAPP_MEDIA_BASE_URL` | unset | Public URL clients use to reach this server (e.g. `https://wa.example.com`, behind your proxy). When set, `download_media` also returns a signed, expiring `url` served at `<base>/media/…`, and `prepare_upload` returns a signed upload URL at `<base>/upload/…`. `http`/`sse` transports only |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30`                              | Stdio parent-liveness poll interval (seconds); exits on parent reparent only |
 
 ### MCP transport (stdio vs http/sse)
